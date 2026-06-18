@@ -1,8 +1,8 @@
-from urllib.parse import urlsplit
+from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup, Tag
 
 def normalize_url(url: str) -> str:
-    parsed_url = urlsplit(url)
+    parsed_url = urlparse(url)
     full_path = f"{parsed_url.netloc}{parsed_url.path}"
     full_path = full_path.rstrip("/")
     return full_path.lower()
@@ -11,7 +11,6 @@ def get_heading_from_html(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     h_tag = soup.find("h1") or soup.find("h2")
     return h_tag.get_text(strip=True) if isinstance(h_tag, Tag) else ""
-    
 
 def get_first_paragraph_from_html(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
@@ -21,3 +20,37 @@ def get_first_paragraph_from_html(html: str) -> str:
     else:
         first_p = soup.find("p")
     return first_p.get_text(strip=True) if isinstance(first_p, Tag) else ""
+
+def get_urls_from_html(html: str, base_url: str) -> list[str]:
+    urls: list[str] = []
+    soup = BeautifulSoup(html, "html.parser")
+    
+    for a in soup.find_all("a"):
+        if not isinstance(a, Tag):
+            continue
+        href = a.get("href")
+        if href and isinstance(href, str):
+            try:
+                absolute_url = urljoin(base_url, href)
+                urls.append(absolute_url)
+            except Exception as e:
+                print(f"{str(e)}: {href}")
+    
+    return urls
+
+def get_images_from_html(html: str, base_url: str) -> list[str]:
+    image_urls: list[str] = []
+    soup = BeautifulSoup(html, "html.parser")
+    
+    for img in soup.find_all("img"):
+        if not isinstance(img, Tag):
+            continue
+        src = img.get("src")
+        if src and isinstance(src, str):
+            try:
+                absolute_url = urljoin(base_url, src)
+                image_urls.append(absolute_url)
+            except Exception as e:
+                print(f"{str(e)}: {src}")
+    
+    return image_urls
