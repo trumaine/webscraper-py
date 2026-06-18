@@ -1,5 +1,16 @@
+from typing import TypedDict
 from urllib.parse import urlparse, urljoin
+
 from bs4 import BeautifulSoup, Tag
+
+
+class PageData(TypedDict):
+    url: str
+    heading: str
+    first_paragraph: str
+    outgoing_links: list[str]
+    image_urls: list[str]
+
 
 def normalize_url(url: str) -> str:
     parsed_url = urlparse(url)
@@ -15,11 +26,11 @@ def get_heading_from_html(html: str) -> str:
 def get_first_paragraph_from_html(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     main_section = soup.find("main")
-    if isinstance(main_section, Tag):
+    if main_section and isinstance(main_section, Tag):
         first_p = main_section.find("p")
     else:
         first_p = soup.find("p")
-    return first_p.get_text(strip=True) if isinstance(first_p, Tag) else ""
+    return first_p.get_text(strip=True) if first_p and isinstance(first_p, Tag) else ""
 
 def get_urls_from_html(html: str, base_url: str) -> list[str]:
     urls: list[str] = []
@@ -54,3 +65,12 @@ def get_images_from_html(html: str, base_url: str) -> list[str]:
                 print(f"{str(e)}: {src}")
     
     return image_urls
+
+def extract_page_data(html: str, page_url: str) -> PageData:
+    return {
+        "url": page_url,
+        "heading": get_heading_from_html(html),
+        "first_paragraph": get_first_paragraph_from_html(html),
+        "outgoing_links": get_urls_from_html(html, page_url),
+        "image_urls": get_images_from_html(html, page_url),
+    }
