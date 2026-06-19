@@ -1,8 +1,10 @@
+import asyncio
+from types import TracebackType
 from typing import TypedDict
 from urllib.parse import urlparse, urljoin
 
+import aiohttp
 from bs4 import BeautifulSoup, Tag
-import requests
 
 
 class PageData(TypedDict):
@@ -19,24 +21,29 @@ def normalize_url(url: str) -> str:
     full_path = full_path.rstrip("/")
     return full_path.lower()
 
+
 def get_heading_from_html(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     h_tag = soup.find("h1") or soup.find("h2")
     return h_tag.get_text(strip=True) if isinstance(h_tag, Tag) else ""
 
+
 def get_first_paragraph_from_html(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
+
     main_section = soup.find("main")
     if main_section and isinstance(main_section, Tag):
         first_p = main_section.find("p")
     else:
         first_p = soup.find("p")
+
     return first_p.get_text(strip=True) if first_p and isinstance(first_p, Tag) else ""
 
+
 def get_urls_from_html(html: str, base_url: str) -> list[str]:
-    urls: list[str] = []
+    urls = []
     soup = BeautifulSoup(html, "html.parser")
-    
+
     for a in soup.find_all("a"):
         if not isinstance(a, Tag):
             continue
@@ -47,13 +54,14 @@ def get_urls_from_html(html: str, base_url: str) -> list[str]:
                 urls.append(absolute_url)
             except Exception as e:
                 print(f"{str(e)}: {href}")
-    
+
     return urls
+
 
 def get_images_from_html(html: str, base_url: str) -> list[str]:
     image_urls: list[str] = []
     soup = BeautifulSoup(html, "html.parser")
-    
+
     for img in soup.find_all("img"):
         if not isinstance(img, Tag):
             continue
@@ -64,8 +72,9 @@ def get_images_from_html(html: str, base_url: str) -> list[str]:
                 image_urls.append(absolute_url)
             except Exception as e:
                 print(f"{str(e)}: {src}")
-    
+
     return image_urls
+
 
 def extract_page_data(html: str, page_url: str) -> PageData:
     return {
@@ -76,60 +85,92 @@ def extract_page_data(html: str, page_url: str) -> PageData:
         "image_urls": get_images_from_html(html, page_url),
     }
 
-def get_html(url: str) -> str:
-    try:
-        response = requests.get(url, headers={"User-Agent": "BootCrawler/1.0"})
-    except Exception as e:
-        raise Exception(f"network error while fetching {url}: {str(e)}")
-    
-    if response.status_code >= 400:
-        raise Exception(f"got http herror: {response.status_code} {response.reason}")
-    
-    content_type = response.headers.get("content-type", "")
-    if "text/html" not in content_type:
-        raise Exception(f"got non-HTML response: {content_type}")
-    
-    return response.text
 
-def crawl_page(
-    base_url: str, 
-    current_url: str | None = None, 
-    page_data: dict[str, PageData] | None = None,
-) -> dict[str, PageData]:
-    if current_url is None:
-        current_url = base_url
-    
-    if page_data is None:
-        page_data = {}
-    
-    base_url_obj = urlparse(base_url)
-    current_url_obj = urlparse(current_url)
-    if current_url_obj.netloc != base_url_obj.netloc:
-        return page_data
-    
-    normalized_url = normalize_url(current_url)
-    
-    if normalized_url in page_data:
-        return page_data
-    
-    print(f"crawling: {normalized_url}")
-    html = safe_get_html(current_url)
-    if html is None:
-        return page_data
+class AsyncCrawler:
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url
+        self.base_domain = urlparse(base_url).netloc
+        self.page_data: dict[str, PageData] = {}
+        self.lock = asyncio.Lock()
+        self.max_concurrency = 3
+        self.semaphore = asyncio.Semaphore(self.max_concurrency)
+        self.session: aiohttp.ClientSession | None = None
 
-    page_info = extract_page_data(html, current_url)
-    page_data[normalized_url] = page_info
+    async def __aenter__(self) -> "AsyncCrawler":
+        self.session = aiohttp.ClientSession()
+        return self
 
-    next_urls = page_info["outgoing_links"]
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        assert self.session is not None
+        await self.session.close()
 
-    for next_url in next_urls:
-        page_data = crawl_page(base_url, next_url, page_data)
-    
-    return page_data
+    async def add_page_visit(self, normalized_url: str) -> bool:
+        async with self.lock:
+            if normalized_url in self.page_data:
+                return False
+            else:
+                return True
 
-def safe_get_html(url: str) -> str | None:
-    try:
-        return get_html(url)
-    except Exception as e:
-        print(f"{e}")
-        return None
+    async def get_html(self, url: str) -> str | None:
+        try:
+            assert self.session is not None
+            async with self.session.get(
+                url, headers={"User-Agent": "BootCrawler/1.0"}
+            ) as response:
+                if response.status >= 400:
+                    print(f"Error: HTTP {response.status} for {url}")
+                    return None
+
+                content_type = response.headers.get("content-type", "")
+                if "text/html" not in content_type:
+                    print(f"Error: Non-HTML content {content_type} for {url}")
+                    return None
+
+                return await response.text()
+        except Exception as e:
+            print (f"Error fetching {url}: {str(e)}")
+            return None
+
+    async def crawl_page(self, current_url: str) -> None:
+        current_url_obj = urlparse(current_url)
+        if current_url_obj.netloc != self.base_domain:
+            return
+
+        normalized_url = normalize_url(current_url)
+
+        is_new = await self.add_page_visit(normalized_url)
+        if not is_new:
+            return
+
+        async with self.semaphore:
+            print(f"Crawling: {current_url} (Active: {self.max_concurrency - self.semaphore._value})")
+            html = await self.get_html(current_url)
+            if html is None:
+                return
+
+            page_info = extract_page_data(html, current_url)
+            async with self.lock:
+                self.page_data[normalized_url] = page_info
+
+            next_urls = page_info["outgoing_links"]
+
+        tasks: list[asyncio.Task[None]] = []
+        for next_url in next_urls:
+            tasks.append(asyncio.create_task(self.crawl_page(next_url)))
+
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    async def crawl(self) -> dict[str, PageData]:
+        await self.crawl_page(self.base_url)
+        return self.page_data
+
+
+async def crawl_site_async(base_url: str) -> dict[str, PageData]:
+    async with AsyncCrawler(base_url) as crawler:
+        return await crawler.crawl()
